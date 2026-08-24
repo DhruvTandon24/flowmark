@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "FlowMark",
+  "version": "1.0.0",
+  "description": "A fast, modern bookmark manager replacement.",
+  "action": {
+    "default_popup": "index.html"
+  },
+  "permissions": [
+    "bookmarks",
+    "tabs"
+  ]
+}
