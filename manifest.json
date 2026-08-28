@@ -6,6 +6,15 @@
   "action": {
     "default_popup": "index.html"
   },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+B",
+        "mac": "Alt+B"
+      },
+      "description": "Open FlowMark"
+    }
+  },
   "permissions": [
     "bookmarks",
     "tabs"
