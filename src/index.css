@@ -5,21 +5,42 @@ body {
   width: 800px;
   height: 600px;
   margin: 0;
-  background-color: #f9fafb;
+  overflow: hidden;
+  background-color: #202124;
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Custom Sleek Scrollbar */
+/* Custom Sleek Dynamic Scrollbar */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 0px; /* Hides the horizontal scrollbar completely */
+  width: 5px;
+  height: 0px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
-  background-color: #cbd5e1; /* Tailwind slate-300 */
-  border-radius: 10px;
+  background-color: var(--border-divider, #cbd5e1);
+  border-radius: 9999px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
-  background-color: #94a3b8; /* Tailwind slate-400 */
+  background-color: var(--text-secondary, #94a3b8);
+}
+
+/* Hide scrollbars for breadcrumbs & clean UI elements */
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.select-none {
+  user-select: none;
+  -webkit-user-select: none;
 }

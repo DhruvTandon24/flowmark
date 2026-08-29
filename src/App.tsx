@@ -35,6 +35,7 @@ export default function App() {
   const [formTitle, setFormTitle] = useState('');
   const [formUrl, setFormUrl] = useState('');
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
+  const [formParentId, setFormParentId] = useState('1');
 
   const fetchBookmarks = () => {
     if (typeof chrome !== 'undefined' && chrome.bookmarks) {
@@ -60,6 +61,26 @@ export default function App() {
     }
   }, []);
 
+  // --- Auto-Sync UI for Folders (Fixes the "Create not working" bug) ---
+  useEffect(() => {
+    if (currentFolder && bookmarks.length > 0) {
+      const findFolder = (nodes: BookmarkItem[], id: string): BookmarkItem | null => {
+        for (const node of nodes) {
+          if (node.id === id) return node;
+          if (node.children) {
+            const found = findFolder(node.children, id);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const updatedFolder = findFolder(bookmarks, currentFolder.id);
+      if (updatedFolder) {
+        setCurrentFolder(updatedFolder);
+      }
+    }
+  }, [bookmarks]);
+
   useEffect(() => {
     setSelectedIndex(0);
   }, [searchQuery, currentFolder]);
@@ -67,7 +88,7 @@ export default function App() {
   // --- CRUD Operations ---
   const handleSaveCurrentTab = () => {
     if (typeof chrome !== 'undefined' && chrome.bookmarks && activeTab) {
-      const parentId = currentFolder ? currentFolder.id : '1'; // Default to Bookmarks Bar ('1')
+      const parentId = currentFolder ? currentFolder.id : '1';
       chrome.bookmarks.create({ parentId, title: activeTab.title, url: activeTab.url }, () => {
         setCreateMenuOpen(false);
         fetchBookmarks();
@@ -77,14 +98,13 @@ export default function App() {
 
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
+    e.stopPropagation(); // Traps Enter key
     if (typeof chrome === 'undefined' || !chrome.bookmarks) return;
 
-    const parentId = currentFolder ? currentFolder.id : '1';
-
     if (modalType === 'addFolder') {
-      chrome.bookmarks.create({ parentId, title: formTitle }, fetchBookmarks);
+      chrome.bookmarks.create({ parentId: formParentId, title: formTitle }, fetchBookmarks);
     } else if (modalType === 'addBookmark') {
-      chrome.bookmarks.create({ parentId, title: formTitle, url: formUrl }, fetchBookmarks);
+      chrome.bookmarks.create({ parentId: formParentId, title: formTitle, url: formUrl }, fetchBookmarks);
     } else if (modalType === 'editBookmark' || modalType === 'editFolder') {
       if (activeItem) {
         chrome.bookmarks.update(activeItem.id, { title: formTitle, url: formUrl || undefined }, fetchBookmarks);
@@ -101,11 +121,9 @@ export default function App() {
     if (typeof chrome === 'undefined' || !chrome.bookmarks) return;
     
     if (!item.url) {
-      // It's a folder, trigger confirmation modal
       setActiveItem(item);
       setModalType('deleteFolder');
     } else {
-      // It's a bookmark, delete instantly
       chrome.bookmarks.remove(item.id, fetchBookmarks);
     }
   };
@@ -139,19 +157,47 @@ export default function App() {
     return list;
   };
 
-  // --- Exact Search Match Engine ---
+  // --- Folder Extraction Engine for Dropdown ---
+  const getFolderList = (nodes: BookmarkItem[], depth = 0): { id: string, title: string, depth: number }[] => {
+    let folders: { id: string, title: string, depth: number }[] = [];
+    nodes.forEach(node => {
+      if (!node.url) {
+        folders.push({ id: node.id, title: node.title || 'Untitled', depth });
+        if (node.children) {
+          folders = folders.concat(getFolderList(node.children, depth + 1));
+        }
+      }
+    });
+    return folders;
+  };
+  const allFolders = getFolderList(bookmarks);
+
+  // --- Exact Search Match Engine & Sorting ---
   let visibleItems: BookmarkItem[] = [];
   
+  const sortFoldersFirst = (items: BookmarkItem[]) => {
+    return [...items].sort((a, b) => {
+      const aIsFolder = !a.url;
+      const bIsFolder = !b.url;
+      if (aIsFolder && !bIsFolder) return -1; 
+      if (!aIsFolder && bIsFolder) return 1;  
+      return (a.title || '').localeCompare(b.title || '');
+    });
+  };
+
   if (searchQuery.trim()) {
     const allBookmarks = flattenBookmarks(bookmarks);
     const query = searchQuery.toLowerCase();
-    visibleItems = allBookmarks.filter((b) =>
+    const searchResults = allBookmarks.filter((b) =>
       b.title.toLowerCase().includes(query) || (b.url && b.url.toLowerCase().includes(query))
     );
+    visibleItems = sortFoldersFirst(searchResults);
   } else if (currentFolder) {
-    visibleItems = currentFolder.children || [];
+    // INSIDE A FOLDER: Push folders to top, then alphabetize
+    visibleItems = sortFoldersFirst(currentFolder.children || []);
   } else {
-    visibleItems = [...recentBookmarks, ...bookmarks];
+    // HOME SCREEN: 5 Recents pinned untouched, followed by standard root folders
+    visibleItems = [...recentBookmarks, ...sortFoldersFirst(bookmarks)];
   }
 
   const handleOpenFolder = (folder: BookmarkItem) => {
@@ -280,7 +326,7 @@ export default function App() {
           />
           
           <button 
-            onClick={() => setModalType('settings')}
+            onClick={() => { setModalType('settings'); setCreateMenuOpen(false); }}
             className="p-1.5 rounded-md ml-2 transition-colors cursor-pointer shrink-0"
             style={{ color: 'var(--text-secondary)' }}
             onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-hover)'}
@@ -419,7 +465,7 @@ export default function App() {
         {/* Global Create Menu */}
         <div className="relative">
           <button
-            onClick={() => setCreateMenuOpen(!createMenuOpen)}
+            onClick={() => { setCreateMenuOpen(!createMenuOpen); closeModal(); }}
             className="flex items-center px-3 py-1.5 rounded-md text-[13px] font-medium transition-colors cursor-pointer"
             style={{ backgroundColor: createMenuOpen ? 'var(--bg-active)' : 'transparent', color: 'var(--accent)' }}
             onMouseEnter={(e) => { if(!createMenuOpen) e.currentTarget.style.backgroundColor = 'var(--bg-hover)' }}
@@ -434,10 +480,10 @@ export default function App() {
               <button onClick={handleSaveCurrentTab} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 Save Current Tab
               </button>
-              <button onClick={() => { setModalType('addBookmark'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+              <button onClick={() => { setModalType('addBookmark'); setFormParentId(currentFolder ? currentFolder.id : '1'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 New Bookmark
               </button>
-              <button onClick={() => { setModalType('addFolder'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+              <button onClick={() => { setModalType('addFolder'); setFormParentId(currentFolder ? currentFolder.id : '1'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 New Folder
               </button>
             </div>
@@ -489,7 +535,7 @@ export default function App() {
 
             {/* Form Modals (Add/Edit Bookmark/Folder) */}
             {(modalType === 'addFolder' || modalType === 'addBookmark' || modalType === 'editBookmark' || modalType === 'editFolder') && (
-              <form onSubmit={handleSubmitForm} className="p-5 flex flex-col gap-3">
+              <form onSubmit={handleSubmitForm} onKeyDown={(e) => e.stopPropagation()} className="p-5 flex flex-col gap-3">
                 <h2 className="text-[14px] font-bold mb-1" style={{ color: 'var(--text-primary)' }}>
                   {modalType.includes('add') ? 'Create New ' : 'Edit '}
                   {modalType.toLowerCase().includes('folder') ? 'Folder' : 'Bookmark'}
@@ -523,6 +569,27 @@ export default function App() {
                       onBlur={(e) => e.target.style.borderColor = 'transparent'}
                       required 
                     />
+                  </div>
+                )}
+
+                {/* New Destination Folder Selector */}
+                {(modalType === 'addBookmark' || modalType === 'addFolder') && (
+                  <div>
+                    <label className="block text-[11px] mb-1 font-medium" style={{ color: 'var(--text-secondary)' }}>Save Location</label>
+                    <select
+                      value={formParentId}
+                      onChange={(e) => setFormParentId(e.target.value)}
+                      className="w-full px-3 py-2 rounded-md text-[13px] outline-none appearance-none cursor-pointer"
+                      style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)', border: '1px solid transparent' }}
+                      onFocus={(e) => e.target.style.borderColor = 'var(--accent)'}
+                      onBlur={(e) => e.target.style.borderColor = 'transparent'}
+                    >
+                      {allFolders.map(folder => (
+                        <option key={folder.id} value={folder.id}>
+                          {'\u00A0'.repeat(folder.depth * 4)}{folder.title}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 )}
 
