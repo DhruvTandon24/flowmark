@@ -2,8 +2,6 @@
 @import "tailwindcss";
 
 body {
-  width: 800px;
-  height: 600px;
   margin: 0;
   overflow: hidden;
   background-color: #202124;

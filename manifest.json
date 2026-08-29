@@ -17,6 +17,10 @@
   },
   "permissions": [
     "bookmarks",
-    "tabs"
-  ]
+    "tabs",
+    "sidePanel"
+  ],
+  "side_panel": {
+    "default_path": "index.html?mode=sidebar"
+  }
 }

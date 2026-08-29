@@ -9,7 +9,12 @@ interface BookmarkItem {
   parentId?: string;
 }
 
-type ModalType = 'none' | 'settings' | 'addFolder' | 'addBookmark' | 'editBookmark' | 'editFolder' | 'deleteFolder';
+type ModalType = 'none' | 'settings' | 'addFolder' | 'addBookmark' | 'editBookmark' | 'editFolder' | 'deleteItem';
+type ThemeType = 'light' | 'dark' | 'system';
+type ViewModeType = 'popup' | 'sidebar';
+
+// Detect if Chrome launched us as a side panel via the manifest URL parameter
+const isSidebar = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mode') === 'sidebar';
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
@@ -23,11 +28,46 @@ export default function App() {
   const [breadcrumbs, setBreadcrumbs] = useState<{id: string, title: string}[]>([]);
 
   // --- Preferences State ---
-  const [theme, setTheme] = useState<'light'|'dark'>(() => (localStorage.getItem('fm_theme') as 'light'|'dark') || 'dark');
+  const [theme, setTheme] = useState<ThemeType>(() => (localStorage.getItem('fm_theme') as ThemeType) || 'system');
+  const [effectiveTheme, setEffectiveTheme] = useState<'light'|'dark'>('dark');
   const [isCompact, setIsCompact] = useState(() => localStorage.getItem('fm_compact') === 'true');
+  const [openInNewTab, setOpenInNewTab] = useState(() => localStorage.getItem('fm_newtab') !== 'false');
+  const [viewMode, setViewMode] = useState<ViewModeType>(() => (localStorage.getItem('fm_viewMode') as ViewModeType) || 'popup');
   
   useEffect(() => { localStorage.setItem('fm_theme', theme); }, [theme]);
   useEffect(() => { localStorage.setItem('fm_compact', String(isCompact)); }, [isCompact]);
+  useEffect(() => { localStorage.setItem('fm_newtab', String(openInNewTab)); }, [openInNewTab]);
+  useEffect(() => { localStorage.setItem('fm_viewMode', viewMode); }, [viewMode]);
+
+  // --- View Mode Engine Switcher ---
+  // Tells Chrome to re-route the extension icon click & Alt+B shortcut
+  useEffect(() => {
+    if (typeof chrome !== 'undefined' && chrome.action && chrome.sidePanel) {
+      if (viewMode === 'sidebar') {
+        chrome.action.setPopup({ popup: '' }); // Disables popup
+        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
+      } else {
+        chrome.action.setPopup({ popup: 'index.html' }); // Re-enables popup
+        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(console.error);
+      }
+    }
+  }, [viewMode]);
+
+  // --- Tri-State Theme Engine ---
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const updateTheme = () => {
+      if (theme === 'system') {
+        setEffectiveTheme(mediaQuery.matches ? 'dark' : 'light');
+      } else {
+        setEffectiveTheme(theme);
+      }
+    };
+    updateTheme();
+    const listener = () => updateTheme();
+    mediaQuery.addEventListener('change', listener);
+    return () => mediaQuery.removeEventListener('change', listener);
+  }, [theme]);
 
   // --- Modal & Form State ---
   const [modalType, setModalType] = useState<ModalType>('none');
@@ -53,7 +93,8 @@ export default function App() {
   useEffect(() => {
     fetchBookmarks();
     if (typeof chrome !== 'undefined' && chrome.tabs) {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      // PATCHED: Changed currentWindow to lastFocusedWindow to catch the actual browser tab
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
         if (tabs[0] && tabs[0].url && tabs[0].title) {
           setActiveTab({ title: tabs[0].title, url: tabs[0].url });
         }
@@ -61,7 +102,7 @@ export default function App() {
     }
   }, []);
 
-  // --- Auto-Sync UI for Folders (Fixes the "Create not working" bug) ---
+  // --- Auto-Sync UI for Folders ---
   useEffect(() => {
     if (currentFolder && bookmarks.length > 0) {
       const findFolder = (nodes: BookmarkItem[], id: string): BookmarkItem | null => {
@@ -85,6 +126,19 @@ export default function App() {
     setSelectedIndex(0);
   }, [searchQuery, currentFolder]);
 
+  // --- Link Routing Engine ---
+  const handleOpenLink = (url: string) => {
+    if (openInNewTab) {
+      window.open(url, '_blank');
+    } else {
+      if (typeof chrome !== 'undefined' && chrome.tabs) {
+        chrome.tabs.update({ url });
+      } else {
+        window.location.href = url;
+      }
+    }
+  };
+
   // --- CRUD Operations ---
   const handleSaveCurrentTab = () => {
     if (typeof chrome !== 'undefined' && chrome.bookmarks && activeTab) {
@@ -98,7 +152,7 @@ export default function App() {
 
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
-    e.stopPropagation(); // Traps Enter key
+    e.stopPropagation(); 
     if (typeof chrome === 'undefined' || !chrome.bookmarks) return;
 
     if (modalType === 'addFolder') {
@@ -109,8 +163,12 @@ export default function App() {
       if (activeItem) {
         chrome.bookmarks.update(activeItem.id, { title: formTitle, url: formUrl || undefined }, fetchBookmarks);
       }
-    } else if (modalType === 'deleteFolder' && activeItem) {
-      chrome.bookmarks.removeTree(activeItem.id, fetchBookmarks);
+    } else if (modalType === 'deleteItem' && activeItem) {
+      if (activeItem.url) {
+        chrome.bookmarks.remove(activeItem.id, fetchBookmarks);
+      } else {
+        chrome.bookmarks.removeTree(activeItem.id, fetchBookmarks);
+      }
     }
     
     closeModal();
@@ -118,14 +176,8 @@ export default function App() {
 
   const handleQuickDelete = (item: BookmarkItem, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (typeof chrome === 'undefined' || !chrome.bookmarks) return;
-    
-    if (!item.url) {
-      setActiveItem(item);
-      setModalType('deleteFolder');
-    } else {
-      chrome.bookmarks.remove(item.id, fetchBookmarks);
-    }
+    setActiveItem(item);
+    setModalType('deleteItem');
   };
 
   const openEditModal = (item: BookmarkItem, e: React.MouseEvent) => {
@@ -157,7 +209,6 @@ export default function App() {
     return list;
   };
 
-  // --- Folder Extraction Engine for Dropdown ---
   const getFolderList = (nodes: BookmarkItem[], depth = 0): { id: string, title: string, depth: number }[] => {
     let folders: { id: string, title: string, depth: number }[] = [];
     nodes.forEach(node => {
@@ -172,7 +223,6 @@ export default function App() {
   };
   const allFolders = getFolderList(bookmarks);
 
-  // --- Exact Search Match Engine & Sorting ---
   let visibleItems: BookmarkItem[] = [];
   
   const sortFoldersFirst = (items: BookmarkItem[]) => {
@@ -193,10 +243,8 @@ export default function App() {
     );
     visibleItems = sortFoldersFirst(searchResults);
   } else if (currentFolder) {
-    // INSIDE A FOLDER: Push folders to top, then alphabetize
     visibleItems = sortFoldersFirst(currentFolder.children || []);
   } else {
-    // HOME SCREEN: 5 Recents pinned untouched, followed by standard root folders
     visibleItems = [...recentBookmarks, ...sortFoldersFirst(bookmarks)];
   }
 
@@ -232,7 +280,6 @@ export default function App() {
   // --- Keyboard & App Navigation ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Modal override
       if (modalType !== 'none') {
         if (e.key === 'Escape') closeModal();
         return;
@@ -241,7 +288,6 @@ export default function App() {
         setCreateMenuOpen(false);
         return;
       }
-
       if (e.key === 'Escape') {
         if (searchQuery) {
           e.preventDefault();
@@ -252,9 +298,7 @@ export default function App() {
         }
         return;
       }
-
       if (visibleItems.length === 0) return;
-
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setSelectedIndex((prev) => (prev < visibleItems.length - 1 ? prev + 1 : prev));
@@ -265,18 +309,16 @@ export default function App() {
         e.preventDefault();
         const selectedItem = visibleItems[selectedIndex];
         if (selectedItem) {
-          if (selectedItem.url) window.open(selectedItem.url, '_blank');
+          if (selectedItem.url) handleOpenLink(selectedItem.url);
           else handleOpenFolder(selectedItem);
         }
       }
     };
-
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [visibleItems, selectedIndex, searchQuery, currentFolder, breadcrumbs, modalType, createMenuOpen]);
+  }, [visibleItems, selectedIndex, searchQuery, currentFolder, breadcrumbs, modalType, createMenuOpen, openInNewTab]);
 
-  // Strict Native Chrome Palette
-  const themeVars = theme === 'dark' ? {
+  const themeVars = effectiveTheme === 'dark' ? {
     '--bg-main': '#202124',
     '--bg-overlay': 'rgba(0,0,0,0.5)',
     '--bg-hover': '#35363a',
@@ -300,7 +342,8 @@ export default function App() {
 
   return (
     <div 
-      className="relative flex flex-col w-[800px] h-[600px] overflow-hidden transition-colors duration-150"
+      // Responsive Container: 100% width in Side Panel, strictly 800x600 in Popup
+      className={`relative flex flex-col overflow-hidden transition-colors duration-150 ${isSidebar ? 'w-full h-screen' : 'w-[800px] h-[600px]'}`}
       style={{ 
         ...themeVars,
         fontFamily: "'Inter', sans-serif",
@@ -395,7 +438,7 @@ export default function App() {
                   <div 
                     className={`group flex items-center justify-between px-3 ${isCompact ? 'py-1.5' : 'py-2.5'} rounded-md transition-colors cursor-pointer relative`}
                     style={{ backgroundColor: isSelected ? 'var(--bg-active)' : 'transparent' }}
-                    onClick={() => isFolder ? handleOpenFolder(item) : window.open(item.url, '_blank')}
+                    onClick={() => isFolder ? handleOpenFolder(item) : handleOpenLink(item.url as string)}
                     onMouseEnter={() => setSelectedIndex(index)}
                   >
                     {isSelected && <div className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-md" style={{ backgroundColor: 'var(--accent)' }} />}
@@ -412,7 +455,7 @@ export default function App() {
                         {!isFolder && (
                           <div className="flex items-center gap-1.5 mt-0.5 overflow-hidden">
                             {searchQuery && item.path && (
-                              <span className="text-[10px] px-1.5 py-[1px] rounded shrink-0 opacity-80" style={{ backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: 'var(--text-secondary)' }}>
+                              <span className="text-[10px] px-1.5 py-[1px] rounded shrink-0 opacity-80" style={{ backgroundColor: effectiveTheme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: 'var(--text-secondary)' }}>
                                 {item.path}
                               </span>
                             )}
@@ -477,9 +520,15 @@ export default function App() {
           
           {createMenuOpen && (
             <div className="absolute bottom-full right-0 mb-2 w-48 rounded-lg shadow-xl py-1 overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-150" style={{ backgroundColor: 'var(--bg-main)', border: '1px solid var(--border-divider)' }}>
-              <button onClick={handleSaveCurrentTab} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
-                Save Current Tab
-              </button>
+              {activeTab ? (
+                <button onClick={handleSaveCurrentTab} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                  Save Current Tab
+                </button>
+              ) : (
+                <div className="w-full text-left px-4 py-2 text-[13px] opacity-50 cursor-not-allowed italic" style={{ color: 'var(--text-secondary)' }}>
+                  Cannot save this page
+                </div>
+              )}
               <button onClick={() => { setModalType('addBookmark'); setFormParentId(currentFolder ? currentFolder.id : '1'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 New Bookmark
               </button>
@@ -495,37 +544,113 @@ export default function App() {
       {modalType !== 'none' && (
         <div className="absolute inset-0 z-50 flex items-center justify-center animate-in fade-in duration-150" style={{ backgroundColor: 'var(--bg-overlay)' }} onClick={closeModal}>
           <div 
-            className="w-[340px] rounded-xl shadow-2xl overflow-hidden" 
+            className="w-[340px] rounded-xl shadow-2xl overflow-hidden max-h-[90vh] overflow-y-auto hide-scrollbar" 
             style={{ backgroundColor: 'var(--bg-main)', border: '1px solid var(--border-divider)' }}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
           >
             
-            {/* Settings Modal */}
+            {/* Professional Settings Center */}
             {modalType === 'settings' && (
-              <div className="p-5">
-                <h2 className="text-[14px] font-bold mb-4" style={{ color: 'var(--text-primary)' }}>Preferences</h2>
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Dark Theme</span>
-                    <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} className="px-3 py-1 rounded text-[12px] font-medium transition-colors" style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)' }}>
-                      {theme === 'dark' ? 'Disable' : 'Enable'}
-                    </button>
+              <div className="p-5 flex flex-col gap-6">
+                <h2 className="text-[15px] font-bold" style={{ color: 'var(--text-primary)' }}>Preferences</h2>
+                
+                {/* Appearance Section */}
+                <div>
+                  <h3 className="text-[11px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--text-secondary)' }}>Appearance</h3>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Default View</span>
+                      <select 
+                        value={viewMode} 
+                        onChange={(e) => setViewMode(e.target.value as ViewModeType)}
+                        className="px-2 py-1 rounded-md text-[12px] font-medium outline-none cursor-pointer border"
+                        style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)', borderColor: 'var(--border-divider)' }}
+                      >
+                        <option value="popup">Popup Mode</option>
+                        <option value="sidebar">Side Panel Mode</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Theme Mode</span>
+                      <select 
+                        value={theme} 
+                        onChange={(e) => setTheme(e.target.value as ThemeType)}
+                        className="px-2 py-1 rounded-md text-[12px] font-medium outline-none cursor-pointer border"
+                        style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)', borderColor: 'var(--border-divider)' }}
+                      >
+                        <option value="light">Light</option>
+                        <option value="dark">Dark</option>
+                        <option value="system">System Default</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Compact Layout</span>
+                      <button 
+                        onClick={() => setIsCompact(!isCompact)} 
+                        className="px-3 py-1 rounded text-[12px] font-medium transition-colors border" 
+                        style={{ 
+                          backgroundColor: isCompact ? 'var(--accent)' : 'var(--bg-hover)', 
+                          color: isCompact ? '#ffffff' : 'var(--text-primary)',
+                          borderColor: isCompact ? 'transparent' : 'var(--border-divider)' 
+                        }}
+                      >
+                        {isCompact ? 'Enabled' : 'Disabled'}
+                      </button>
+                    </div>
                   </div>
+                </div>
+
+                {/* Behavior Section */}
+                <div>
+                  <h3 className="text-[11px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--text-secondary)' }}>Behavior</h3>
                   <div className="flex items-center justify-between">
-                    <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Compact Layout</span>
-                    <button onClick={() => setIsCompact(!isCompact)} className="px-3 py-1 rounded text-[12px] font-medium transition-colors" style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)' }}>
-                      {isCompact ? 'Disable' : 'Enable'}
+                    <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Open links in new tab</span>
+                    <button 
+                      onClick={() => setOpenInNewTab(!openInNewTab)} 
+                      className="px-3 py-1 rounded text-[12px] font-medium transition-colors border" 
+                      style={{ 
+                        backgroundColor: openInNewTab ? 'var(--accent)' : 'var(--bg-hover)', 
+                        color: openInNewTab ? '#ffffff' : 'var(--text-primary)',
+                        borderColor: openInNewTab ? 'transparent' : 'var(--border-divider)' 
+                      }}
+                    >
+                      {openInNewTab ? 'Enabled' : 'Disabled'}
                     </button>
                   </div>
                 </div>
+
+                {/* Keyboard Shortcuts Section */}
+                <div>
+                  <h3 className="text-[11px] font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--text-secondary)' }}>Keyboard Shortcuts</h3>
+                  <div className="grid grid-cols-2 gap-y-3 gap-x-2">
+                    <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                      <kbd className="px-1.5 py-0.5 rounded border font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)', backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)' }}>↑ ↓</kbd> Navigate List
+                    </div>
+                    <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                      <kbd className="px-1.5 py-0.5 rounded border font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)', backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)' }}>↵</kbd> Open Item
+                    </div>
+                    <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                      <kbd className="px-1.5 py-0.5 rounded border font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)', backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)' }}>Esc</kbd> Go Back / Close
+                    </div>
+                    <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-secondary)' }}>
+                      <kbd className="px-1.5 py-0.5 rounded border font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)', backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)' }}>Alt+B</kbd> FlowMark
+                    </div>
+                  </div>
+                </div>
+
               </div>
             )}
 
-            {/* Folder Delete Confirmation Modal */}
-            {modalType === 'deleteFolder' && (
+            {/* Universal Delete Confirmation Modal */}
+            {modalType === 'deleteItem' && (
               <div className="p-5">
-                <h2 className="text-[14px] font-bold mb-2" style={{ color: 'var(--text-primary)' }}>Delete Folder</h2>
-                <p className="text-[13px] mb-5" style={{ color: 'var(--text-secondary)' }}>Are you sure you want to delete "{activeItem?.title}" and all its contents?</p>
+                <h2 className="text-[14px] font-bold mb-2" style={{ color: 'var(--text-primary)' }}>Confirm Deletion</h2>
+                <p className="text-[13px] mb-5" style={{ color: 'var(--text-secondary)' }}>
+                  {activeItem?.url 
+                    ? `Are you sure you want to delete this bookmark: "${activeItem.title}"?`
+                    : `Are you sure you want to delete the folder "${activeItem?.title}" and all its contents?`}
+                </p>
                 <div className="flex gap-2 justify-end">
                   <button onClick={closeModal} className="px-4 py-2 text-[13px] font-medium rounded-md hover:bg-black/5 dark:hover:bg-white/5 transition-colors">Cancel</button>
                   <button onClick={handleSubmitForm} className="px-4 py-2 text-[13px] font-medium rounded-md text-white transition-colors" style={{ backgroundColor: 'var(--danger)' }}>Delete</button>
@@ -572,7 +697,6 @@ export default function App() {
                   </div>
                 )}
 
-                {/* New Destination Folder Selector */}
                 {(modalType === 'addBookmark' || modalType === 'addFolder') && (
                   <div>
                     <label className="block text-[11px] mb-1 font-medium" style={{ color: 'var(--text-secondary)' }}>Save Location</label>
@@ -605,4 +729,4 @@ export default function App() {
       )}
     </div>
   );
-}
+} 
