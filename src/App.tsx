@@ -1,18 +1,28 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface BookmarkItem {
   id: string;
   title: string;
   url?: string;
   children?: BookmarkItem[];
+  path?: string; // Added to track folder location
 }
 
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
+  const [recentBookmarks, setRecentBookmarks] = useState<BookmarkItem[]>([]);
   const [activeTab, setActiveTab] = useState<{ title: string; url: string } | null>(null);
   const [savedStatus, setSavedStatus] = useState(false);
-  const [selectedIndex, setSelectedIndex] = useState(0); // Tracks keyboard highlight
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  // --- Traversal State ---
+  const [currentFolder, setCurrentFolder] = useState<BookmarkItem | null>(null);
+  const [breadcrumbs, setBreadcrumbs] = useState<{id: string, title: string}[]>([]);
+
+  // --- Theme State ---
+  const [theme, setTheme] = useState<'light'|'dark'>(() => (localStorage.getItem('fm_theme') as 'light'|'dark') || 'dark');
+  useEffect(() => { localStorage.setItem('fm_theme', theme); }, [theme]);
 
   const fetchBookmarks = () => {
     if (typeof chrome !== 'undefined' && chrome.bookmarks) {
@@ -20,6 +30,9 @@ export default function App() {
         if (tree && tree[0] && tree[0].children) {
           setBookmarks(tree[0].children);
         }
+      });
+      chrome.bookmarks.getRecent(5, (recent) => {
+        setRecentBookmarks(recent);
       });
     }
   };
@@ -35,10 +48,9 @@ export default function App() {
     }
   }, []);
 
-  // Reset keyboard highlight to the top when typing a new search
   useEffect(() => {
     setSelectedIndex(0);
-  }, [searchQuery]);
+  }, [searchQuery, currentFolder]);
 
   const handleBookmarkCurrentTab = () => {
     if (typeof chrome !== 'undefined' && chrome.bookmarks && activeTab) {
@@ -53,186 +65,283 @@ export default function App() {
     }
   };
 
-  const handleDelete = (id: string, e: React.MouseEvent) => {
-    e.preventDefault(); // Prevents the link from opening when clicking delete
-    e.stopPropagation();
-    if (typeof chrome !== 'undefined' && chrome.bookmarks) {
-      chrome.bookmarks.remove(id, () => {
-        fetchBookmarks(); // Instantly refresh UI after deletion
-      });
-    }
-  };
-
-  const flattenBookmarks = (nodes: BookmarkItem[]): BookmarkItem[] => {
+  // Modified to recursively track the folder path
+  const flattenBookmarks = (nodes: BookmarkItem[], currentPath = ''): BookmarkItem[] => {
     let list: BookmarkItem[] = [];
     nodes.forEach((node) => {
-      if (node.url) list.push(node);
-      if (node.children) list = list.concat(flattenBookmarks(node.children));
+      const nodePath = currentPath ? `${currentPath} / ${node.title}` : node.title;
+      if (node.url) {
+        list.push({ ...node, path: currentPath }); // Attach the parent folder path
+      }
+      if (node.children) {
+        list = list.concat(flattenBookmarks(node.children, nodePath));
+      }
     });
     return list;
   };
 
-  const allBookmarks = flattenBookmarks(bookmarks);
-  const filteredBookmarks = searchQuery.trim()
-    ? allBookmarks.filter(
-        (b) =>
-          b.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          (b.url && b.url.toLowerCase().includes(searchQuery.toLowerCase()))
-      )
-    : null;
+  // --- Unified Rendering Array ---
+  let visibleItems: BookmarkItem[] = [];
+  
+  if (searchQuery.trim()) {
+    const allBookmarks = flattenBookmarks(bookmarks);
+    visibleItems = allBookmarks.filter(
+      (b) =>
+        b.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (b.url && b.url.toLowerCase().includes(searchQuery.toLowerCase()))
+    );
+  } else if (currentFolder) {
+    visibleItems = currentFolder.children || [];
+  } else {
+    visibleItems = [...recentBookmarks, ...bookmarks];
+  }
 
-  // Keyboard Navigation Listener
+  // --- Folder Traversal Logic ---
+  const handleOpenFolder = (folder: BookmarkItem) => {
+    setCurrentFolder(folder);
+    setBreadcrumbs([...breadcrumbs, { id: folder.id, title: folder.title }]);
+  };
+
+  const handleGoBack = (index: number) => {
+    if (index === -1) {
+      setCurrentFolder(null);
+      setBreadcrumbs([]);
+    } else {
+      const targetBreadcrumb = breadcrumbs[index];
+      const findFolder = (nodes: BookmarkItem[], id: string): BookmarkItem | null => {
+        for (const node of nodes) {
+          if (node.id === id) return node;
+          if (node.children) {
+            const found = findFolder(node.children, id);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const found = findFolder(bookmarks, targetBreadcrumb.id);
+      if (found) {
+        setCurrentFolder(found);
+        setBreadcrumbs(breadcrumbs.slice(0, index + 1));
+      }
+    }
+  };
+
+  // --- Keyboard Navigation ---
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!filteredBookmarks || filteredBookmarks.length === 0) return;
+      if (e.key === 'Escape') {
+        if (searchQuery) {
+          e.preventDefault(); // Stops Chrome from closing the extension
+          setSearchQuery('');
+        } else if (currentFolder) {
+          e.preventDefault(); // Stops Chrome from closing the extension
+          handleGoBack(breadcrumbs.length - 2);
+        }
+        return; // If at home screen, allow default Escape to close popup
+      }
+
+      if (visibleItems.length === 0) return;
 
       if (e.key === 'ArrowDown') {
-        e.preventDefault(); // Stops the whole window from scrolling
-        setSelectedIndex((prev) => (prev < filteredBookmarks.length - 1 ? prev + 1 : prev));
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev < visibleItems.length - 1 ? prev + 1 : prev));
       } else if (e.key === 'ArrowUp') {
         e.preventDefault();
         setSelectedIndex((prev) => (prev > 0 ? prev - 1 : 0));
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        const selectedBookmark = filteredBookmarks[selectedIndex];
-        if (selectedBookmark && selectedBookmark.url) {
-          window.open(selectedBookmark.url, '_blank'); // Opens link in new tab
+        const selectedItem = visibleItems[selectedIndex];
+        if (selectedItem) {
+          if (selectedItem.url) {
+            window.open(selectedItem.url, '_blank');
+          } else {
+            handleOpenFolder(selectedItem);
+          }
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [filteredBookmarks, selectedIndex]);
+  }, [visibleItems, selectedIndex, searchQuery, currentFolder, breadcrumbs]);
+
+  // Strict Native Chrome Palette
+  const themeVars = theme === 'dark' ? {
+    '--bg-main': '#202124',
+    '--bg-hover': '#35363a',
+    '--bg-active': 'rgba(138, 180, 248, 0.08)',
+    '--border-divider': '#3c4043',
+    '--text-primary': '#e8eaed',
+    '--text-secondary': '#9aa0a6',
+    '--accent': '#8ab4f8',
+  } : {
+    '--bg-main': '#ffffff',
+    '--bg-hover': '#f1f3f4',
+    '--bg-active': 'rgba(26, 115, 232, 0.08)',
+    '--border-divider': '#dadce0',
+    '--text-primary': '#202124',
+    '--text-secondary': '#5f6368',
+    '--accent': '#1a73e8',
+  };
 
   return (
-    <div className="flex flex-col h-full bg-slate-50 text-slate-800 font-sans overflow-x-hidden selection:bg-indigo-100 selection:text-indigo-900">
+    <div 
+      className="flex flex-col w-[800px] h-[600px] overflow-hidden transition-colors duration-150"
+      style={{ 
+        ...themeVars,
+        fontFamily: "'Inter', sans-serif",
+        backgroundColor: 'var(--bg-main)',
+        color: 'var(--text-primary)',
+      } as React.CSSProperties}
+    >
       
       {/* Search Header */}
-      <div className="px-6 pt-6 pb-4 bg-white/80 backdrop-blur-md sticky top-0 z-10 border-b border-slate-100 shadow-sm">
-        <div className="relative group">
-          <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
-            <svg className="w-5 h-5 text-slate-400 group-focus-within:text-indigo-500 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-            </svg>
-          </div>
+      <div className="flex flex-col shrink-0" style={{ borderBottom: '1px solid var(--border-divider)' }}>
+        <div className="flex items-center px-4 py-3">
+          <svg className="w-5 h-5 mr-3 shrink-0" style={{ color: 'var(--text-secondary)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+          </svg>
           <input
             type="text"
             autoFocus
-            placeholder="Search FlowMark..."
-            className="w-full pl-12 pr-4 py-4 bg-slate-50 border border-slate-200 rounded-2xl text-lg focus:outline-none focus:ring-4 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white transition-all duration-300 placeholder:text-slate-400"
+            placeholder="Search bookmarks..."
+            className="w-full bg-transparent text-[15px] outline-none placeholder-opacity-70"
+            style={{ color: 'var(--text-primary)' }}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
+          
+          <button 
+            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+            className="p-1.5 rounded-md ml-2 transition-colors cursor-pointer shrink-0"
+            style={{ color: 'var(--text-secondary)' }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-hover)'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+            title="Toggle Theme"
+          >
+            {theme === 'dark' ? (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+            ) : (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+            )}
+          </button>
         </div>
-      </div>
 
-      {/* List Area */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
-        {filteredBookmarks !== null ? (
-          <div>
-            <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">
-              Search Results ({filteredBookmarks.length})
-            </p>
-            <div className="space-y-2">
-              {filteredBookmarks.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-slate-400">
-                  <svg className="w-12 h-12 mb-3 text-slate-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                  <p>No matches found</p>
-                </div>
-              ) : (
-                filteredBookmarks.map((bm, index) => (
-                  <a 
-                    key={bm.id} 
-                    href={bm.url} 
-                    target="_blank" 
-                    rel="noreferrer" 
-                    // Dynamic styling based on keyboard highlight
-                    className={`group flex items-center justify-between p-3 border rounded-xl transition-all duration-200 cursor-pointer ${
-                      index === selectedIndex 
-                        ? 'bg-indigo-50/50 border-indigo-200 shadow-sm transform -translate-y-0.5' 
-                        : 'bg-white border-slate-100 hover:shadow-md hover:border-indigo-200 hover:-translate-y-0.5'
-                    }`}
-                  >
-                    <div className="flex items-center overflow-hidden">
-                      <div className={`flex-shrink-0 w-10 h-10 flex items-center justify-center rounded-lg transition-colors ${
-                        index === selectedIndex ? 'bg-indigo-500 text-white' : 'bg-indigo-50 text-indigo-500 group-hover:bg-indigo-500 group-hover:text-white'
-                      }`}>
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path></svg>
-                      </div>
-                      <div className="ml-4 overflow-hidden">
-                        <p className={`text-sm font-semibold truncate transition-colors ${index === selectedIndex ? 'text-indigo-700' : 'text-slate-700 group-hover:text-indigo-600'}`}>{bm.title || bm.url}</p>
-                        <p className="text-xs text-slate-400 truncate mt-0.5">{bm.url}</p>
-                      </div>
-                    </div>
-                    
-                    {/* Delete Button (Visible on Hover/Focus) */}
-                    <button 
-                      onClick={(e) => handleDelete(bm.id, e)}
-                      className="opacity-0 group-hover:opacity-100 p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                      title="Delete Bookmark"
-                    >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    </button>
-                  </a>
-                ))
-              )}
-            </div>
+        {/* Breadcrumbs */}
+        {!searchQuery && breadcrumbs.length > 0 && (
+          <div className="flex items-center px-4 py-1.5 text-[12px] overflow-x-auto hide-scrollbar" style={{ backgroundColor: 'var(--bg-hover)', borderTop: '1px solid var(--border-divider)' }}>
+            <button onClick={() => handleGoBack(-1)} className="hover:underline opacity-80 transition-opacity hover:opacity-100" style={{ color: 'var(--text-secondary)' }}>Home</button>
+            {breadcrumbs.map((bc, i) => (
+              <React.Fragment key={bc.id}>
+                <span className="mx-1.5 opacity-50" style={{ color: 'var(--text-secondary)' }}>/</span>
+                <button 
+                  onClick={() => handleGoBack(i)}
+                  className={`hover:underline transition-opacity ${i === breadcrumbs.length - 1 ? 'font-medium' : 'opacity-80 hover:opacity-100'}`}
+                  style={{ color: i === breadcrumbs.length - 1 ? 'var(--text-primary)' : 'var(--text-secondary)' }}
+                >
+                  {bc.title}
+                </button>
+              </React.Fragment>
+            ))}
           </div>
-        ) : (
-          bookmarks.map((folder) => (
-            <div key={folder.id} className="mb-6">
-              <h2 className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 px-2">
-                <span className="flex items-center">
-                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
-                  {folder.title}
-                </span>
-              </h2>
-              <div className="grid grid-cols-2 gap-3">
-                {folder.children?.map((bm) =>
-                  bm.url ? (
-                    <a key={bm.id} href={bm.url} target="_blank" rel="noreferrer" className="group flex items-center justify-between p-3.5 bg-white border border-slate-200/60 rounded-xl hover:shadow-[0_4px_12px_rgba(0,0,0,0.05)] hover:border-indigo-300 hover:-translate-y-0.5 transition-all duration-200 cursor-pointer">
-                      <div className="flex items-center flex-1 min-w-0 mr-3">
-                        <img src={`https://www.google.com/s2/favicons?domain=${bm.url}&sz=32`} alt="favicon" className="w-5 h-5 rounded-sm opacity-80 shrink-0" />
-                        <span className="ml-3 text-[13px] font-medium text-slate-700 truncate">{bm.title || bm.url}</span>
-                      </div>
-                      {/* Delete Button for Grid View */}
-                      <button 
-                        onClick={(e) => handleDelete(bm.id, e)}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-all"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                      </button>
-                    </a>
-                  ) : null
-                )}
-              </div>
-            </div>
-          ))
         )}
       </div>
 
-      {/* Floating Action Footer */}
-      <div className="p-4 bg-white border-t border-slate-100 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.02)]">
+      {/* Main Content Area */}
+      <div className="flex-1 overflow-y-auto p-2 scroll-smooth">
+        {visibleItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            {searchQuery ? (
+              <>
+                <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>No results found for "{searchQuery}"</p>
+                <p className="text-[11px] mt-1 opacity-70" style={{ color: 'var(--text-secondary)' }}>Press <kbd className="px-1 rounded border border-gray-500/30">Esc</kbd> to clear</p>
+              </>
+            ) : (
+              <>
+                <svg className="w-10 h-10 mb-3 opacity-20" style={{ color: 'var(--text-primary)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"></path></svg>
+                <p className="text-[13px]" style={{ color: 'var(--text-secondary)' }}>This folder is empty</p>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-0.5">
+            {visibleItems.map((item, index) => {
+              const isSelected = index === selectedIndex;
+              const isFolder = !item.url;
+              
+              let header = null;
+              if (!searchQuery && !currentFolder) {
+                if (index === 0 && recentBookmarks.length > 0) {
+                  header = <h2 className="text-[10px] font-bold uppercase tracking-wider mt-2 mb-1.5 px-3" style={{ color: 'var(--text-secondary)' }}>Recently Added</h2>;
+                }
+                if (index === recentBookmarks.length) {
+                  header = <h2 className="text-[10px] font-bold uppercase tracking-wider mt-4 mb-1.5 px-3" style={{ color: 'var(--text-secondary)' }}>Bookmarks</h2>;
+                }
+              }
+
+              return (
+                <React.Fragment key={`${item.id}-${index}`}>
+                  {header}
+                  <a 
+                    onClick={() => isFolder ? handleOpenFolder(item) : window.open(item.url, '_blank')}
+                    className="group flex items-center px-3 py-2.5 rounded-md transition-colors cursor-pointer relative"
+                    style={{ backgroundColor: isSelected ? 'var(--bg-active)' : 'transparent' }}
+                    onMouseEnter={(e) => { if(!isSelected) e.currentTarget.style.backgroundColor = 'var(--bg-hover)'; setSelectedIndex(index); }}
+                    onMouseLeave={(e) => { if(!isSelected) e.currentTarget.style.backgroundColor = 'transparent'; }}
+                  >
+                    {isSelected && <div className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-md" style={{ backgroundColor: 'var(--accent)' }} />}
+                    
+                    {isFolder ? (
+                      <svg className="w-4 h-4 shrink-0 opacity-70" style={{ color: 'var(--text-primary)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                    ) : (
+                      <img src={`https://www.google.com/s2/favicons?domain=${item.url}&sz=32`} alt="" className="w-4 h-4 rounded-sm shrink-0 grayscale-[20%] group-hover:grayscale-0 transition-all" />
+                    )}
+                    
+                    <div className="ml-3 flex flex-col overflow-hidden w-full">
+                      <p className="text-[13px] font-medium truncate" style={{ color: isSelected ? 'var(--accent)' : 'var(--text-primary)' }}>{item.title || item.url}</p>
+                      
+                      {!isFolder && (
+                        <div className="flex items-center gap-1.5 mt-0.5 overflow-hidden">
+                          {/* Folder Path (Only shown during search) */}
+                          {searchQuery && item.path && (
+                            <span className="text-[10px] px-1.5 py-[1px] rounded shrink-0 opacity-80" style={{ backgroundColor: theme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: 'var(--text-secondary)' }}>
+                              {item.path}
+                            </span>
+                          )}
+                          <p className="text-[12px] truncate opacity-70" style={{ color: 'var(--text-secondary)' }}>{item.url}</p>
+                        </div>
+                      )}
+                    </div>
+                  </a>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Footer Toolbar */}
+      <div className="px-4 py-2.5 flex items-center justify-between shrink-0" style={{ borderTop: '1px solid var(--border-divider)', backgroundColor: 'var(--bg-main)' }}>
+        <div className="flex items-center gap-3">
+          <span className="flex items-center text-[11px] opacity-70" style={{ color: 'var(--text-secondary)' }}>
+            <kbd className="px-1.5 py-0.5 rounded border mr-1 font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)' }}>↑↓</kbd> Navigate
+          </span>
+          <span className="flex items-center text-[11px] opacity-70" style={{ color: 'var(--text-secondary)' }}>
+            <kbd className="px-1.5 py-0.5 rounded border mr-1 font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)' }}>↵</kbd> Open
+          </span>
+          <span className="flex items-center text-[11px] opacity-70" style={{ color: 'var(--text-secondary)' }}>
+            <kbd className="px-1.5 py-0.5 rounded border mr-1 font-mono text-[10px]" style={{ borderColor: 'var(--border-divider)' }}>Esc</kbd> Back / Clear
+          </span>
+        </div>
+
         <button
           onClick={handleBookmarkCurrentTab}
-          className={`relative w-full flex items-center justify-center py-3.5 px-4 rounded-xl text-sm font-bold shadow-sm transition-all duration-300 overflow-hidden ${
-            savedStatus 
-              ? 'bg-emerald-500 text-white shadow-emerald-500/30 ring-4 ring-emerald-500/20' 
-              : 'bg-slate-900 text-white hover:bg-indigo-600 hover:shadow-indigo-500/30 active:scale-[0.98]'
-          }`}
+          className="flex items-center px-3 py-1.5 rounded-md text-[12px] font-medium transition-colors cursor-pointer"
+          style={{ color: savedStatus ? '#81c995' : 'var(--accent)' }}
+          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--bg-hover)'}
+          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
         >
-          {savedStatus ? (
-            <span className="flex items-center animate-pulse">
-              <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
-              Page Saved!
-            </span>
-          ) : (
-            <span className="flex items-center">
-              <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>
-              Bookmark Current Tab
-            </span>
-          )}
+          {savedStatus ? '✓ Saved' : '+ Save Tab'}
         </button>
       </div>
     </div>
