@@ -153,8 +153,6 @@ FlowMark
 
 ## 🚀 Installation
 
-### Option 1: Load from Source (Developer Mode)
-
 1. **Clone the repository:**
    ```bash
    git clone https://github.com/DhruvTandon24/flowmark.git
