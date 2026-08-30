@@ -3,8 +3,18 @@
   "name": "FlowMark",
   "version": "1.0.0",
   "description": "A fast, modern bookmark manager replacement.",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "action": {
-    "default_popup": "index.html"
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   },
   "commands": {
     "_execute_action": {

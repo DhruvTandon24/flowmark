@@ -1,11 +1,28 @@
 {
   "name": "flowmark",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "A fast, modern bookmark manager and native Side Panel replacement for Google Chrome.",
   "type": "module",
+  "author": "Dhruv Tandon",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DhruvTandon24/flowmark.git"
+  },
+  "keywords": [
+    "chrome-extension",
+    "bookmark-manager",
+    "side-panel",
+    "manifest-v3",
+    "react",
+    "vite",
+    "typescript",
+    "tailwindcss"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "typecheck": "tsc -b",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -22,12 +39,10 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
-    "autoprefixer": "^10.5.4",
     "eslint": "^10.9.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.4",
     "globals": "^17.11.0",
-    "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.67.0",

@@ -7,18 +7,36 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies & Build Output
 node_modules
 dist
 dist-ssr
+
+# Environment & local files
+.env
+.env.*
+!.env.example
 *.local
 
-# Editor directories and files
+# TypeScript & Linter Cache
+*.tsbuildinfo
+.eslintcache
+
+# Chrome Extension packaging artifacts
+*.crx
+*.pem
+*.zip
+
+# Editor & OS files
 .vscode/*
 !.vscode/extensions.json
 .idea
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+

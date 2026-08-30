@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 
 interface BookmarkItem {
   id: string;
@@ -16,6 +16,54 @@ type ViewModeType = 'popup' | 'sidebar';
 // Detect if Chrome launched us as a side panel via the manifest URL parameter
 const isSidebar = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('mode') === 'sidebar';
 
+const findFolderInTree = (nodes: BookmarkItem[], id: string): BookmarkItem | null => {
+  for (const node of nodes) {
+    if (node.id === id) return node;
+    if (node.children) {
+      const found = findFolderInTree(node.children, id);
+      if (found) return found;
+    }
+  }
+  return null;
+};
+
+const flattenBookmarks = (nodes: BookmarkItem[], currentPath = ''): BookmarkItem[] => {
+  let list: BookmarkItem[] = [];
+  nodes.forEach((node) => {
+    const nodePath = currentPath ? `${currentPath} / ${node.title}` : node.title;
+    if (node.url) {
+      list.push({ ...node, path: currentPath });
+    }
+    if (node.children) {
+      list = list.concat(flattenBookmarks(node.children, nodePath));
+    }
+  });
+  return list;
+};
+
+const getFolderList = (nodes: BookmarkItem[], depth = 0): { id: string; title: string; depth: number }[] => {
+  let folders: { id: string; title: string; depth: number }[] = [];
+  nodes.forEach((node) => {
+    if (!node.url) {
+      folders.push({ id: node.id, title: node.title || 'Untitled', depth });
+      if (node.children) {
+        folders = folders.concat(getFolderList(node.children, depth + 1));
+      }
+    }
+  });
+  return folders;
+};
+
+const sortFoldersFirst = (items: BookmarkItem[]) => {
+  return [...items].sort((a, b) => {
+    const aIsFolder = !a.url;
+    const bIsFolder = !b.url;
+    if (aIsFolder && !bIsFolder) return -1; 
+    if (!aIsFolder && bIsFolder) return 1;  
+    return (a.title || '').localeCompare(b.title || '');
+  });
+};
+
 export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
@@ -24,8 +72,14 @@ export default function App() {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
   // --- Traversal State ---
-  const [currentFolder, setCurrentFolder] = useState<BookmarkItem | null>(null);
-  const [breadcrumbs, setBreadcrumbs] = useState<{id: string, title: string}[]>([]);
+  const [breadcrumbs, setBreadcrumbs] = useState<{ id: string; title: string }[]>([]);
+
+  // Automatically derive current folder from breadcrumbs & bookmarks tree
+  const currentFolder = useMemo(() => {
+    if (breadcrumbs.length === 0) return null;
+    const currentBreadcrumb = breadcrumbs[breadcrumbs.length - 1];
+    return findFolderInTree(bookmarks, currentBreadcrumb.id);
+  }, [bookmarks, breadcrumbs]);
 
   // --- Preferences State ---
   const [theme, setTheme] = useState<ThemeType>(() => (localStorage.getItem('fm_theme') as ThemeType) || 'system');
@@ -77,7 +131,7 @@ export default function App() {
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [formParentId, setFormParentId] = useState('1');
 
-  const fetchBookmarks = () => {
+  const fetchBookmarks = useCallback(() => {
     if (typeof chrome !== 'undefined' && chrome.bookmarks) {
       chrome.bookmarks.getTree((tree) => {
         if (tree && tree[0] && tree[0].children) {
@@ -88,22 +142,18 @@ export default function App() {
         setRecentBookmarks(recent);
       });
     }
-  };
+  }, []);
 
-  // The '1' (Bookmarks Bar) id isn't guaranteed to exist on every profile/Chrome
-  // build, which caused "Can't find parent bookmark for id" errors. Fall back to
-  // the first real top-level folder from the actual fetched tree instead.
-  const getDefaultParentId = (): string => {
+  const getDefaultParentId = useCallback((): string => {
     if (currentFolder) return currentFolder.id;
     return bookmarks[0]?.id ?? '1';
-  };
+  }, [currentFolder, bookmarks]);
 
   useEffect(() => {
     fetchBookmarks();
     
     const syncActiveTab = () => {
       if (typeof chrome !== 'undefined' && chrome.tabs) {
-        // Changed lastFocusedWindow to currentWindow
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
           const current = tabs[0];
           if (current && current.url) {
@@ -127,34 +177,10 @@ export default function App() {
         chrome.tabs.onUpdated.removeListener(syncActiveTab);
       };
     }
-  }, []);
-
-  // --- Auto-Sync UI for Folders ---
-  useEffect(() => {
-    if (currentFolder && bookmarks.length > 0) {
-      const findFolder = (nodes: BookmarkItem[], id: string): BookmarkItem | null => {
-        for (const node of nodes) {
-          if (node.id === id) return node;
-          if (node.children) {
-            const found = findFolder(node.children, id);
-            if (found) return found;
-          }
-        }
-        return null;
-      };
-      const updatedFolder = findFolder(bookmarks, currentFolder.id);
-      if (updatedFolder) {
-        setCurrentFolder(updatedFolder);
-      }
-    }
-  }, [bookmarks]);
-
-  useEffect(() => {
-    setSelectedIndex(0);
-  }, [searchQuery, currentFolder]);
+  }, [fetchBookmarks]);
 
   // --- Link Routing Engine ---
-  const handleOpenLink = (url: string) => {
+  const handleOpenLink = useCallback((url: string) => {
     if (openInNewTab) {
       window.open(url, '_blank');
     } else {
@@ -164,7 +190,29 @@ export default function App() {
         window.location.href = url;
       }
     }
-  };
+  }, [openInNewTab]);
+
+  // --- Navigation Handlers ---
+  const handleOpenFolder = useCallback((folder: BookmarkItem) => {
+    setBreadcrumbs((prev) => [...prev, { id: folder.id, title: folder.title }]);
+    setSelectedIndex(0);
+  }, []);
+
+  const handleGoBack = useCallback((index: number) => {
+    if (index === -1) {
+      setBreadcrumbs([]);
+    } else {
+      setBreadcrumbs((prev) => prev.slice(0, index + 1));
+    }
+    setSelectedIndex(0);
+  }, []);
+
+  const closeModal = useCallback(() => {
+    setModalType('none');
+    setActiveItem(null);
+    setFormTitle('');
+    setFormUrl('');
+  }, []);
 
   // --- CRUD Operations ---
   const handleSaveCurrentTab = () => {
@@ -244,94 +292,22 @@ export default function App() {
     setModalType(item.url ? 'editBookmark' : 'editFolder');
   };
 
-  const closeModal = () => {
-    setModalType('none');
-    setActiveItem(null);
-    setFormTitle('');
-    setFormUrl('');
-  };
+  const allFolders = useMemo(() => getFolderList(bookmarks), [bookmarks]);
 
-  const flattenBookmarks = (nodes: BookmarkItem[], currentPath = ''): BookmarkItem[] => {
-    let list: BookmarkItem[] = [];
-    nodes.forEach((node) => {
-      const nodePath = currentPath ? `${currentPath} / ${node.title}` : node.title;
-      if (node.url) {
-        list.push({ ...node, path: currentPath });
-      }
-      if (node.children) {
-        list = list.concat(flattenBookmarks(node.children, nodePath));
-      }
-    });
-    return list;
-  };
-
-  const getFolderList = (nodes: BookmarkItem[], depth = 0): { id: string, title: string, depth: number }[] => {
-    let folders: { id: string, title: string, depth: number }[] = [];
-    nodes.forEach(node => {
-      if (!node.url) {
-        folders.push({ id: node.id, title: node.title || 'Untitled', depth });
-        if (node.children) {
-          folders = folders.concat(getFolderList(node.children, depth + 1));
-        }
-      }
-    });
-    return folders;
-  };
-  const allFolders = getFolderList(bookmarks);
-
-  let visibleItems: BookmarkItem[] = [];
-  
-  const sortFoldersFirst = (items: BookmarkItem[]) => {
-    return [...items].sort((a, b) => {
-      const aIsFolder = !a.url;
-      const bIsFolder = !b.url;
-      if (aIsFolder && !bIsFolder) return -1; 
-      if (!aIsFolder && bIsFolder) return 1;  
-      return (a.title || '').localeCompare(b.title || '');
-    });
-  };
-
-  if (searchQuery.trim()) {
-    const allBookmarks = flattenBookmarks(bookmarks);
-    const query = searchQuery.toLowerCase();
-    const searchResults = allBookmarks.filter((b) =>
-      b.title.toLowerCase().includes(query) || (b.url && b.url.toLowerCase().includes(query))
-    );
-    visibleItems = sortFoldersFirst(searchResults);
-  } else if (currentFolder) {
-    visibleItems = sortFoldersFirst(currentFolder.children || []);
-  } else {
-    visibleItems = [...recentBookmarks, ...sortFoldersFirst(bookmarks)];
-  }
-
-  const handleOpenFolder = (folder: BookmarkItem) => {
-    setCurrentFolder(folder);
-    setBreadcrumbs([...breadcrumbs, { id: folder.id, title: folder.title }]);
-  };
-
-  const handleGoBack = (index: number) => {
-    if (index === -1) {
-      setCurrentFolder(null);
-      setBreadcrumbs([]);
-    } else {
-      const targetBreadcrumb = breadcrumbs[index];
-      const findFolder = (nodes: BookmarkItem[], id: string): BookmarkItem | null => {
-        for (const node of nodes) {
-          if (node.id === id) return node;
-          if (node.children) {
-            const found = findFolder(node.children, id);
-            if (found) return found;
-          }
-        }
-        return null;
-      };
-      const found = findFolder(bookmarks, targetBreadcrumb.id);
-      if (found) {
-        setCurrentFolder(found);
-        setBreadcrumbs(breadcrumbs.slice(0, index + 1));
-      }
+  const visibleItems = useMemo(() => {
+    if (searchQuery.trim()) {
+      const allBookmarks = flattenBookmarks(bookmarks);
+      const query = searchQuery.toLowerCase();
+      const searchResults = allBookmarks.filter((b) =>
+        b.title.toLowerCase().includes(query) || (b.url && b.url.toLowerCase().includes(query))
+      );
+      return sortFoldersFirst(searchResults);
     }
-  };
+    if (currentFolder) {
+      return sortFoldersFirst(currentFolder.children || []);
+    }
+    return [...recentBookmarks, ...sortFoldersFirst(bookmarks)];
+  }, [searchQuery, bookmarks, currentFolder, recentBookmarks]);
 
   // --- Keyboard & App Navigation ---
   useEffect(() => {
@@ -348,7 +324,8 @@ export default function App() {
         if (searchQuery) {
           e.preventDefault();
           setSearchQuery('');
-        } else if (currentFolder) {
+          setSelectedIndex(0);
+        } else if (breadcrumbs.length > 0) {
           e.preventDefault();
           handleGoBack(breadcrumbs.length - 2);
         }
@@ -372,7 +349,18 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [visibleItems, selectedIndex, searchQuery, currentFolder, breadcrumbs, modalType, createMenuOpen, openInNewTab]);
+  }, [
+    modalType,
+    createMenuOpen,
+    searchQuery,
+    breadcrumbs.length,
+    visibleItems,
+    selectedIndex,
+    handleOpenLink,
+    handleOpenFolder,
+    handleGoBack,
+    closeModal,
+  ]);
 
   const themeVars = effectiveTheme === 'dark' ? {
     '--bg-main': '#202124',
@@ -421,7 +409,10 @@ export default function App() {
             className="w-full bg-transparent text-[15px] outline-none placeholder-opacity-70"
             style={{ color: 'var(--text-primary)' }}
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setSelectedIndex(0);
+            }}
           />
           
           <button 
