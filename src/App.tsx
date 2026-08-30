@@ -90,15 +90,42 @@ export default function App() {
     }
   };
 
+  // The '1' (Bookmarks Bar) id isn't guaranteed to exist on every profile/Chrome
+  // build, which caused "Can't find parent bookmark for id" errors. Fall back to
+  // the first real top-level folder from the actual fetched tree instead.
+  const getDefaultParentId = (): string => {
+    if (currentFolder) return currentFolder.id;
+    return bookmarks[0]?.id ?? '1';
+  };
+
   useEffect(() => {
     fetchBookmarks();
+    
+    const syncActiveTab = () => {
+      if (typeof chrome !== 'undefined' && chrome.tabs) {
+        // Changed lastFocusedWindow to currentWindow
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const current = tabs[0];
+          if (current && current.url) {
+            setActiveTab({ title: current.title || current.url, url: current.url });
+          } else {
+            setActiveTab(null);
+          }
+        });
+      }
+    };
+
+    syncActiveTab();
+
+    // Listeners keep the Side Panel UI perfectly in sync when switching tabs
     if (typeof chrome !== 'undefined' && chrome.tabs) {
-      // PATCHED: Changed currentWindow to lastFocusedWindow to catch the actual browser tab
-      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
-        if (tabs[0] && tabs[0].url && tabs[0].title) {
-          setActiveTab({ title: tabs[0].title, url: tabs[0].url });
-        }
-      });
+      chrome.tabs.onActivated.addListener(syncActiveTab);
+      chrome.tabs.onUpdated.addListener(syncActiveTab);
+      
+      return () => {
+        chrome.tabs.onActivated.removeListener(syncActiveTab);
+        chrome.tabs.onUpdated.removeListener(syncActiveTab);
+      };
     }
   }, []);
 
@@ -141,36 +168,65 @@ export default function App() {
 
   // --- CRUD Operations ---
   const handleSaveCurrentTab = () => {
-    if (typeof chrome !== 'undefined' && chrome.bookmarks && activeTab) {
-      const parentId = currentFolder ? currentFolder.id : '1';
-      chrome.bookmarks.create({ parentId, title: activeTab.title, url: activeTab.url }, () => {
+    if (typeof chrome === 'undefined' || !chrome.bookmarks) {
+      console.error('[FlowMark] chrome.bookmarks API unavailable — check manifest permissions');
+      return;
+    }
+    if (!activeTab) {
+      console.warn('[FlowMark] handleSaveCurrentTab called with no activeTab set');
+      return;
+    }
+    const parentId = getDefaultParentId();
+    chrome.bookmarks.create(
+      { parentId, title: activeTab.title, url: activeTab.url },
+      (result) => {
+        if (chrome.runtime.lastError) {
+          console.error('[FlowMark] Failed to save current tab:', chrome.runtime.lastError.message, { parentId, activeTab });
+          return;
+        }
+        console.log('[FlowMark] Saved current tab as bookmark:', result);
         setCreateMenuOpen(false);
         fetchBookmarks();
-      });
-    }
+      }
+    );
   };
 
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
-    e.stopPropagation(); 
-    if (typeof chrome === 'undefined' || !chrome.bookmarks) return;
+    e.stopPropagation();
+
+    if (typeof chrome === 'undefined' || !chrome.bookmarks) {
+      console.error('[FlowMark] chrome.bookmarks API unavailable — check manifest permissions');
+      return;
+    }
+
+    // Wrap every mutation with an explicit lastError check so failures never
+    // fail silently. fetchBookmarks() is only called on confirmed success.
+    const withErrorCheck = (label: string) => () => {
+      if (chrome.runtime.lastError) {
+        console.error(`[FlowMark] ${label} failed:`, chrome.runtime.lastError.message);
+        return;
+      }
+      fetchBookmarks();
+    };
 
     if (modalType === 'addFolder') {
-      chrome.bookmarks.create({ parentId: formParentId, title: formTitle }, fetchBookmarks);
+      console.log('[FlowMark] Creating folder:', { parentId: formParentId, title: formTitle });
+      chrome.bookmarks.create({ parentId: formParentId, title: formTitle }, withErrorCheck('Create folder'));
     } else if (modalType === 'addBookmark') {
-      chrome.bookmarks.create({ parentId: formParentId, title: formTitle, url: formUrl }, fetchBookmarks);
+      chrome.bookmarks.create({ parentId: formParentId, title: formTitle, url: formUrl }, withErrorCheck('Create bookmark'));
     } else if (modalType === 'editBookmark' || modalType === 'editFolder') {
       if (activeItem) {
-        chrome.bookmarks.update(activeItem.id, { title: formTitle, url: formUrl || undefined }, fetchBookmarks);
+        chrome.bookmarks.update(activeItem.id, { title: formTitle, url: formUrl || undefined }, withErrorCheck('Update item'));
       }
     } else if (modalType === 'deleteItem' && activeItem) {
       if (activeItem.url) {
-        chrome.bookmarks.remove(activeItem.id, fetchBookmarks);
+        chrome.bookmarks.remove(activeItem.id, withErrorCheck('Delete bookmark'));
       } else {
-        chrome.bookmarks.removeTree(activeItem.id, fetchBookmarks);
+        chrome.bookmarks.removeTree(activeItem.id, withErrorCheck('Delete folder'));
       }
     }
-    
+
     closeModal();
   };
 
@@ -529,10 +585,10 @@ export default function App() {
                   Cannot save this page
                 </div>
               )}
-              <button onClick={() => { setModalType('addBookmark'); setFormParentId(currentFolder ? currentFolder.id : '1'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+              <button onClick={() => { setModalType('addBookmark'); setFormParentId(getDefaultParentId()); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 New Bookmark
               </button>
-              <button onClick={() => { setModalType('addFolder'); setFormParentId(currentFolder ? currentFolder.id : '1'); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+              <button onClick={() => { setModalType('addFolder'); setFormParentId(getDefaultParentId()); setCreateMenuOpen(false); }} className="w-full text-left px-4 py-2 text-[13px] hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 New Folder
               </button>
             </div>
@@ -563,7 +619,12 @@ export default function App() {
                       <span className="text-[13px]" style={{ color: 'var(--text-primary)' }}>Default View</span>
                       <select 
                         value={viewMode} 
-                        onChange={(e) => setViewMode(e.target.value as ViewModeType)}
+                        onChange={(e) => {
+                          // 1. Update the state so the useEffect saves it to Chrome
+                          setViewMode(e.target.value as ViewModeType);
+                          // 2. Give Chrome 50ms to save, then force the UI to close
+                          setTimeout(() => window.close(), 50);
+                        }}
                         className="px-2 py-1 rounded-md text-[12px] font-medium outline-none cursor-pointer border"
                         style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-primary)', borderColor: 'var(--border-divider)' }}
                       >
@@ -729,4 +790,4 @@ export default function App() {
       )}
     </div>
   );
-} 
+}
