@@ -21,22 +21,7 @@
 
 **FlowMark** replaces Chrome's default bookmark interface with a unified, high-performance command-center experience. Designed for keyboard-first efficiency and visual clarity, FlowMark allows you to search across thousands of nested bookmarks instantly, manage folders with breadcrumb navigation, capture active tabs in one click, and seamlessly toggle between a compact floating popup and a full-height Chrome Side Panel.
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│  🔍 Search bookmarks...                                      [⚙ Settings] │
-├────────────────────────────────────────────────────────────────────────┤
-│  Home / Development / Projects / Tools                                 │
-├────────────────────────────────────────────────────────────────────────┤
-│  📁 React Core Docs                                                    │
-│  📁 Tailwind CSS Components                                            │
-│  🌐 GitHub — FlowMark Repository                                       │
-│     Development / Projects / Tools • https://github.com/...            │
-│  🌐 Chrome Web Store Developer Dashboard                               │
-│     Work / Chrome Extensions • https://chrome.google.com/...           │
-├────────────────────────────────────────────────────────────────────────┤
-│  [↑↓] Navigate   [↵] Open   [Esc] Back   [Alt+B] Launch      [+ Create]│
-└────────────────────────────────────────────────────────────────────────┘
-```
+
 
 ---
 
